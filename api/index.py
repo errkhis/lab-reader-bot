@@ -32,6 +32,7 @@ async def start(update: Update, context):
         [
             InlineKeyboardButton("📊 Lab Analysis", callback_data="task_analysis"),
             InlineKeyboardButton("💊 Medications", callback_data="task_medication"),
+            InlineKeyboardButton("📋 Prescription", callback_data="task_prescription"),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -78,7 +79,12 @@ async def button_callback(update: Update, context):
         lang = data.split("_")[1]
         context.user_data["lang"] = lang
         task = context.user_data.get("task", "analysis")
-        task_emoji = "📊" if task == "analysis" else "💊"
+        task_emojis = {
+            "analysis": "📊",
+            "medication": "💊",
+            "prescription": "📋"
+        }
+        task_emoji = task_emojis.get(task, "📊")
         
         await query.edit_message_text(
             f"{task_emoji} Ready for *{task.capitalize()}* in *{lang}*! ✅\n\n"
