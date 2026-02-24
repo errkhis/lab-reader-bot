@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from supabase import create_client, Client
 
 load_dotenv()
 
@@ -17,6 +18,11 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Ensure API_URL has no trailing slash
 API_URL = os.getenv("API_URL", "").rstrip('/')
+
+# Supabase Config
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 # Initialize FastAPI for Vercel
 app = FastAPI()
@@ -55,6 +61,18 @@ async def button_callback(update: Update, context):
     # Step 1 -> Step 2: Choose Language
     if data.startswith("task_"):
         task = data.split("_")[1]
+        
+        # Save task to Supabase
+        if supabase:
+            try:
+                supabase.table("user_state").upsert({
+                    "chat_id": str(chat_id),
+                    "task": task
+                }, on_conflict="chat_id").execute()
+            except Exception as e:
+                logger.error(f"Supabase error (task): {e}")
+        
+        # Fallback to user_data for same-container requests
         context.user_data["task"] = task
         
         keyboard = [
@@ -77,8 +95,24 @@ async def button_callback(update: Update, context):
     # Step 2 -> Step 3: Prompt for Upload
     elif data.startswith("lang_"):
         lang = data.split("_")[1]
+        
+        # Save lang to Supabase
+        if supabase:
+            try:
+                supabase.table("user_state").update({"lang": lang}).eq("chat_id", str(chat_id)).execute()
+            except Exception as e:
+                logger.error(f"Supabase error (lang): {e}")
+
         context.user_data["lang"] = lang
-        task = context.user_data.get("task", "analysis")
+        
+        # Retrieve task (from memory or DB)
+        task = context.user_data.get("task")
+        if not task and supabase:
+            res = supabase.table("user_state").select("task").eq("chat_id", str(chat_id)).execute()
+            if res.data:
+                task = res.data[0].get("task")
+        
+        task = task or "analysis"
         task_emojis = {
             "analysis": "📊",
             "medication": "💊",
@@ -96,17 +130,26 @@ async def button_callback(update: Update, context):
 async def handle_file(update: Update, context):
     """Final Step: Process the uploaded file based on stored task and lang"""
     chat_id = update.effective_chat.id
-    # On Vercel, user_data is often lost between requests. 
-    # We'll default to 'analysis' and 'English' if the memory was cleared.
-    task = context.user_data.get("task", "analysis")
-    lang = context.user_data.get("lang", "English")
+    
+    # Try fetching from Supabase first (most reliable on Vercel)
+    task, lang = None, None
+    if supabase:
+        try:
+            res = supabase.table("user_state").select("task, lang").eq("chat_id", str(chat_id)).execute()
+            if res.data:
+                task = res.data[0].get("task")
+                lang = res.data[0].get("lang")
+        except Exception as e:
+            logger.error(f"Supabase fetch error: {e}")
+
+    # Fallback to user_data or defaults
+    task = task or context.user_data.get("task", "analysis")
+    lang = lang or context.user_data.get("lang", "English")
 
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
-        file_name = "photo.jpg"
     elif update.message.document:
         file_id = update.message.document.file_id
-        file_name = update.message.document.file_name
     else:
         return
 
@@ -129,7 +172,7 @@ async def handle_file(update: Update, context):
             
             if response.status_code == 200:
                 analysis_text = response.json().get("analysis", "No results.")
-                # Clear user data for next session
+                # Clear memory for next session (Supabase stays until next /start flow)
                 context.user_data.clear()
                 
                 # Try sending with Markdown, fallback to plain text if Telegram rejects it
@@ -154,7 +197,6 @@ async def handle_file(update: Update, context):
                 
     except Exception as e:
         logger.error(f"Error: {e}")
-        # Show the actual error so we know exactly what failed (Timeout, Network, etc.)
         await status_msg.edit_text(f"❌ Error: {str(e)}")
 
 # Register handlers
@@ -171,16 +213,10 @@ async def webhook(request: Request):
         data = await request.json()
         update = Update.de_json(data, tg_app.bot)
         
-        # Log update details for debugging
-        logger.info(f"Received update_id: {update.update_id}")
-        
-        # Prevent processing the same update multiple times in this container
         if update.update_id in processed_updates:
-            logger.info(f"Duplicate update_id {update.update_id} ignored.")
             return {"status": "already processed"}
         
         processed_updates.add(update.update_id)
-        # Keep the set size manageable
         if len(processed_updates) > 100:
             processed_updates.pop()
 
