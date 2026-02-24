@@ -1,5 +1,6 @@
 import os
 import logging
+import io
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -22,12 +23,70 @@ app = FastAPI()
 tg_app = Application.builder().token(TOKEN).build()
 
 async def start(update: Update, context):
+    """Entry point: (1) Choice between analysis and medications"""
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 Lab Analysis", callback_data="task_analysis"),
+            InlineKeyboardButton("💊 Medications", callback_data="task_medication"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "Welcome! 🩺\n\nPlease **upload an image or PDF** of your lab report or prescription to begin."
+        "Welcome! 🩺\n\nWhat would you like me to do today?",
+        reply_markup=reply_markup
     )
 
+async def button_callback(update: Update, context):
+    """Processes all button clicks for the multi-step flow"""
+    query = update.callback_query
+    await query.answer()
+    
+    chat_id = update.effective_chat.id
+    data = query.data
+
+    # Step 1 -> Step 2: Choose Language
+    if data.startswith("task_"):
+        task = data.split("_")[1]
+        context.user_data["task"] = task
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🇸🇦 Arabic", callback_data="lang_Arabic"),
+                InlineKeyboardButton("🇪🇸 Spanish", callback_data="lang_Spanish"),
+            ],
+            [
+                InlineKeyboardButton("🇺🇸 English", callback_data="lang_English"),
+                InlineKeyboardButton("🇫🇷 French", callback_data="lang_French"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"Great! You chose **{task.capitalize()}**.\nNow, please select your preferred language:",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+
+    # Step 2 -> Step 3: Prompt for Upload
+    elif data.startswith("lang_"):
+        lang = data.split("_")[1]
+        context.user_data["lang"] = lang
+        task = context.user_data.get("task", "analysis")
+        
+        await query.edit_message_text(
+            f"Setting up for **{task.capitalize()}** in **{lang}**. ✅\n\n📸 Please **upload an image or PDF** of your document now.",
+            parse_mode="Markdown"
+        )
+
 async def handle_file(update: Update, context):
-    """When a file is uploaded, store the file_id in context and show choice buttons."""
+    """Final Step: Process the uploaded file based on stored task and lang"""
+    chat_id = update.effective_chat.id
+    task = context.user_data.get("task")
+    lang = context.user_data.get("lang")
+
+    if not task or not lang:
+        await update.message.reply_text("❌ Please start over by typing /start and follow the choices.")
+        return
+
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
         file_name = "photo.jpg"
@@ -37,52 +96,14 @@ async def handle_file(update: Update, context):
     else:
         return
 
-    # Use chat_id as a key to store the file_id temporarily in memory
-    # Note: On Vercel this is 'best effort' but works for single-flow sessions
-    chat_id = update.effective_chat.id
-    context.bot_data[f"file_{chat_id}"] = file_id
-
-    # Character-limited buttons (must be < 64 chars)
-    keyboard = [
-        [
-            InlineKeyboardButton("English Analysis", callback_data="ans_en"),
-            InlineKeyboardButton("French Analysis", callback_data="ans_fr"),
-        ],
-        [
-            InlineKeyboardButton("English Meds", callback_data="med_en"),
-            InlineKeyboardButton("French Meds", callback_data="med_fr"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"File received: {file_name}\nWhat would you like me to do?",
-        reply_markup=reply_markup
-    )
-
-async def button_callback(update: Update, context):
-    """Processes the button click"""
-    query = update.callback_query
-    await query.answer()
-    
-    chat_id = update.effective_chat.id
-    file_id = context.bot_data.get(f"file_{chat_id}")
-    
-    if not file_id:
-        await query.edit_message_text("❌ Session expired. Please upload your file again.")
-        return
-
-    # Parse button choice
-    task_code, lang_code = query.data.split("_")
-    task = "analysis" if task_code == "ans" else "medication"
-    lang = "English" if lang_code == "en" else "French"
-    
-    await query.edit_message_text(f"Processing your {task} in {lang}... ⏳")
+    status_msg = await update.message.reply_text(f"Processing your {task} in {lang}... ⏳")
 
     try:
         # Download from Telegram
         bot_file = await tg_app.bot.get_file(file_id)
-        file_bytes = await bot_file.download_as_bytearray()
+        out = io.BytesIO()
+        await bot_file.download_to_memory(out)
+        file_bytes = out.getvalue()
         
         endpoint = f"/lab/read-{task}"
         
@@ -94,20 +115,20 @@ async def button_callback(update: Update, context):
             
             if response.status_code == 200:
                 analysis_text = response.json().get("analysis", "No results.")
-                # Clear the file from memory to save space
-                context.bot_data.pop(f"file_{chat_id}", None)
-                await query.message.reply_text(analysis_text, parse_mode="Markdown")
+                # Clear user data for next session
+                context.user_data.clear()
+                await status_msg.edit_text(analysis_text, parse_mode="Markdown")
             else:
-                await query.message.reply_text(f"❌ API Error ({response.status_code})")
+                await status_msg.edit_text(f"❌ API Error ({response.status_code})")
                 
     except Exception as e:
         logger.error(f"Error: {e}")
-        await query.message.reply_text("❌ Failed to process document.")
+        await status_msg.edit_text("❌ Failed to process document. Please try again.")
 
 # Register handlers
 tg_app.add_handler(CommandHandler("start", start))
-tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file))
 tg_app.add_handler(CallbackQueryHandler(button_callback))
+tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file))
 
 @app.post("/")
 @app.post("/webhook")
