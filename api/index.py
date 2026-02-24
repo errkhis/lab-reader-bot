@@ -218,6 +218,13 @@ async def handle_file(update: Update, context):
                 except Exception as e:
                     logger.warning(f"Markdown failed, falling back to plain text: {e}")
                     await status_msg.edit_text(analysis_text)
+                
+                # Automatically show main menu for next document
+                await update.message.reply_text(
+                    "✅ *Done!*\n\nWould you like to analyze another document?",
+                    reply_markup=get_main_menu(),
+                    parse_mode="Markdown"
+                )
             elif response.status_code == 429:
                 await status_msg.edit_text("⚠️ **Gemini API Quota Exceeded**\n\nPlease wait about 60 seconds and try again.", parse_mode="Markdown")
             else:
