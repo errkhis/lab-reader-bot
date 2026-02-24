@@ -80,12 +80,10 @@ async def button_callback(update: Update, context):
 async def handle_file(update: Update, context):
     """Final Step: Process the uploaded file based on stored task and lang"""
     chat_id = update.effective_chat.id
-    task = context.user_data.get("task")
-    lang = context.user_data.get("lang")
-
-    if not task or not lang:
-        await update.message.reply_text("❌ Please start over by typing /start and follow the choices.")
-        return
+    # On Vercel, user_data is often lost between requests. 
+    # We'll default to 'analysis' and 'English' if the memory was cleared.
+    task = context.user_data.get("task", "analysis")
+    lang = context.user_data.get("lang", "English")
 
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
@@ -117,9 +115,15 @@ async def handle_file(update: Update, context):
                 analysis_text = response.json().get("analysis", "No results.")
                 # Clear user data for next session
                 context.user_data.clear()
-                await status_msg.edit_text(analysis_text, parse_mode="Markdown")
+                
+                # Try sending with Markdown, fallback to plain text if Telegram rejects it
+                try:
+                    await status_msg.edit_text(analysis_text, parse_mode="Markdown")
+                except:
+                    await status_msg.edit_text(analysis_text)
+            elif response.status_code == 429:
+                await status_msg.edit_text("⚠️ **Gemini API Quota Exceeded**\n\nPlease wait about 60 seconds and try again.", parse_mode="Markdown")
             else:
-                # Try to get error detail from JSON
                 try:
                     error_detail = response.json().get("detail", "Unknown Error")
                 except:
@@ -128,7 +132,8 @@ async def handle_file(update: Update, context):
                 
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status_msg.edit_text("❌ Failed to process document. Please try again.")
+        # Show the actual error so we know exactly what failed (Timeout, Network, etc.)
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
 
 # Register handlers
 tg_app.add_handler(CommandHandler("start", start))
