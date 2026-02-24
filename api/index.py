@@ -21,8 +21,15 @@ API_URL = os.getenv("API_URL", "").rstrip('/')
 
 # Supabase Config
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+# Vercel integration often uses SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info("✅ Supabase initialized successfully.")
+else:
+    logger.warning("⚠️ Supabase credentials missing. Persistent state disabled.")
 
 # Initialize FastAPI for Vercel
 app = FastAPI()
