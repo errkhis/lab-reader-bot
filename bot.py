@@ -1,154 +1,119 @@
 import os
 import logging
 import httpx
+import json
 from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    ConversationFactory,
-)
+from fastapi import FastAPI, Request
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-# Load environment variables
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants for Conversation States
-CHOOSING_TYPE, CHOOSING_LANGUAGE, UPLOADING = range(3)
-
-# Configuration from ENV
+# Config
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+API_URL = os.getenv("API_URL")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Starts the conversation and asks the user what they want to analyze."""
-    reply_keyboard = [["Analysis", "Medication"]]
-    
+# Initialize FastAPI for Vercel
+app = FastAPI()
+tg_app = Application.builder().token(TOKEN).build()
+
+async def start(update: Update, context):
     await update.message.reply_text(
-        "Welcome to Lab Reader Bot! 🩺\n\n"
-        "I can help you understand your medical reports or prescriptions.\n\n"
-        "What would you like to process?",
-        reply_markup=ReplyKeyboardMarkup(
-            reply_keyboard, one_time_keyboard=True, resize_keyboard=True
-        ),
+        "Welcome! 🩺\n\nPlease **upload an image or PDF** of your lab report or prescription to begin."
     )
-    return CHOOSING_TYPE
 
-async def type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Stores the analysis type and asks for the language."""
-    context.user_data["type"] = update.message.text.lower()
-    
-    reply_keyboard = [["English", "French"], ["Arabic", "Spanish"]]
-    
-    await update.message.reply_text(
-        f"Understood! We'll process your {update.message.text}.\n\n"
-        "In which language would you like to receive the results?",
-        reply_markup=ReplyKeyboardMarkup(
-            reply_keyboard, one_time_keyboard=True, resize_keyboard=True
-        ),
-    )
-    return CHOOSING_LANGUAGE
-
-async def language_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Stores the language and asks for the file."""
-    context.user_data["language"] = update.message.text
-    
-    await update.message.reply_text(
-        f"Perfect. You'll receive the report in {update.message.text}.\n\n"
-        "Now, please upload your image or PDF document.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    return UPLOADING
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the file upload and calls the FastAPI backend."""
-    user = update.message.from_user
-    
-    # Get the file (either Photo or Document)
+async def handle_file(update: Update, context):
+    """When a file is uploaded, ask for the task and language using inline buttons."""
+    # Get file ID based on whether it's a photo or document
     if update.message.photo:
-        file = await update.message.photo[-1].get_file()
-        file_name = f"photo_{user.id}.jpg"
-    else:
-        file = await update.message.document.get_file()
+        file_id = update.message.photo[-1].file_id
+        file_name = "photo.jpg"
+    elif update.message.document:
+        file_id = update.message.document.file_id
         file_name = update.message.document.file_name
+    else:
+        return
 
-    await update.message.reply_text("Processing your document... please wait. ⏳")
+    # Store file info in callback_data (Stateless approach)
+    # Note: Callback data has a 64 character limit. We use a simple key for processing.
+    keyboard = [
+        [
+            InlineKeyboardButton("English Analysis", callback_data=f"ans_en_{file_id}"),
+            InlineKeyboardButton("French Analysis", callback_data=f"ans_fr_{file_id}"),
+        ],
+        [
+            InlineKeyboardButton("English Meds", callback_data=f"med_en_{file_id}"),
+            InlineKeyboardButton("French Meds", callback_data=f"med_fr_{file_id}"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"File received: {file_name}\nWhat would you like me to do?",
+        reply_markup=reply_markup
+    )
 
-    # Download file to memory
-    file_bytes = await file.download_as_bytearray()
+async def button_callback(update: Update, context):
+    """Processes the button click (Stateless)"""
+    query = update.callback_query
+    await query.answer()
     
-    # Prepare API Request
-    task_type = context.user_data.get("type")
-    language = context.user_data.get("language")
-    endpoint = "/lab/read-analysis" if task_type == "analysis" else "/lab/read-medication"
+    # Parse data: task_lang_fileid
+    data = query.data.split("_")
+    task_code = data[0]
+    lang_code = data[1]
+    file_id = data[2]
     
+    task = "analysis" if task_code == "ans" else "medication"
+    lang = "English" if lang_code == "en" else "French"
+    
+    await query.edit_message_text(f"Processing your {task} in {lang}... ⏳")
+
     try:
+        # Download file from Telegram
+        bot_file = await tg_app.bot.get_file(file_id)
+        file_bytes = await bot_file.download_as_bytearray()
+        
+        endpoint = f"/lab/read-{task}"
+        
         async with httpx.AsyncClient(timeout=60.0) as client:
-            files = {"file": (file_name, bytes(file_bytes))}
-            params = {"language": language}
+            files = {"file": ("document", bytes(file_bytes))}
+            params = {"language": lang}
             
             response = await client.post(f"{API_URL}{endpoint}", files=files, params=params)
             
             if response.status_code == 200:
-                result = response.json()
-                analysis_text = result.get("analysis", "No analysis found.")
-                
-                # Telegram has a 4096 character limit for messages
-                if len(analysis_text) > 4000:
-                    for i in range(0, len(analysis_text), 4000):
-                        await update.message.reply_text(analysis_text[i:i+4000], parse_mode="Markdown")
-                else:
-                    await update.message.reply_text(analysis_text, parse_mode="Markdown")
+                analysis_text = response.json().get("analysis", "No results.")
+                await query.message.reply_text(analysis_text, parse_mode="Markdown")
             else:
-                error_detail = response.json().get("detail", "Unknown error")
-                await update.message.reply_text(f"❌ Error from API: {error_detail}")
-
+                await query.message.reply_text(f"❌ API Error: {response.status_code}")
+                
     except Exception as e:
-        logger.error(f"Error calling API: {e}")
-        await update.message.reply_text("❌ Failed to connect to the analysis service.")
+        logger.error(f"Error: {e}")
+        await query.message.reply_text("❌ Failed to process document.")
 
-    return ConversationFactory.END
+# Register handlers
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file))
+tg_app.add_handler(CallbackQueryHandler(button_callback))
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels and ends the conversation."""
-    await update.message.reply_text(
-        "Process cancelled. Use /start whenever you're ready.", 
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationFactory.END
+@app.post("/")
+async def webhook(request: Request):
+    """The entry point for Vercel"""
+    data = await request.json()
+    update = Update.de_json(data, tg_app.bot)
+    
+    # We must initialize the app if it's not ready
+    if not tg_app.running:
+        await tg_app.initialize()
+    
+    await tg_app.process_update(update)
+    return {"status": "ok"}
 
-def main() -> None:
-    """Run the bot."""
-    if not TOKEN:
-        print("Please set TELEGRAM_BOT_TOKEN in your .env file")
-        return
-
-    application = Application.builder().token(TOKEN).build()
-
-    conv_handler = ConversationFactory(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            CHOOSING_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, type_choice)],
-            CHOOSING_LANGUAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, language_choice)],
-            UPLOADING: [
-                MessageHandler(filters.PHOTO | filters.Document.ALL, handle_document)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    application.add_handler(conv_handler)
-
-    print("Bot is starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+@app.get("/")
+async def index():
+    return {"status": "Bot is running on Webhooks"}
