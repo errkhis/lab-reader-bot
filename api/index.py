@@ -39,8 +39,8 @@ tg_app = Application.builder().token(TOKEN).build()
 initialized = False
 processed_updates = set() # Simple cache for the current container lifecycle
 
-async def start(update: Update, context):
-    """Entry point: (1) Choice between analysis and medications"""
+def get_main_menu():
+    """Returns the main task selection keyboard"""
     keyboard = [
         [
             InlineKeyboardButton("📊 Lab Analysis", callback_data="task_analysis"),
@@ -48,12 +48,15 @@ async def start(update: Update, context):
             InlineKeyboardButton("📋 Prescription", callback_data="task_prescription"),
         ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(keyboard)
+
+async def start(update: Update, context):
+    """Entry point: (1) Choice between analysis and medications"""
     await update.message.reply_text(
         "👋 *Welcome to Lab Reader!* 🩺\n\n"
         "I can help you understand your medical documents in plain language.\n\n"
         "*What would you like me to do today?*",
-        reply_markup=reply_markup,
+        reply_markup=get_main_menu(),
         parse_mode="Markdown"
     )
 
@@ -64,6 +67,16 @@ async def button_callback(update: Update, context):
     
     chat_id = update.effective_chat.id
     data = query.data
+
+    # Return to Main Menu
+    if data == "main_menu":
+        await query.edit_message_text(
+            "📍 *Main Menu*\n\n"
+            "What would you like me to do today?",
+            reply_markup=get_main_menu(),
+            parse_mode="Markdown"
+        )
+        return
 
     # Step 1 -> Step 2: Choose Language
     if data.startswith("task_"):
@@ -90,6 +103,9 @@ async def button_callback(update: Update, context):
             [
                 InlineKeyboardButton("🇺🇸 English", callback_data="lang_English"),
                 InlineKeyboardButton("🇫🇷 French", callback_data="lang_French"),
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back to Services", callback_data="main_menu")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -127,10 +143,19 @@ async def button_callback(update: Update, context):
         }
         task_emoji = task_emojis.get(task, "📊")
         
+        keyboard = [
+            [
+                # Allows changing language or task at the final step
+                InlineKeyboardButton("🔄 Change Service / Language", callback_data="main_menu")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         await query.edit_message_text(
             f"{task_emoji} Ready for *{task.capitalize()}* in *{lang}*! ✅\n\n"
             "📸 Please *upload an image or PDF* of your document now.\n\n"
             "_I will process it and provide a detailed explanation._",
+            reply_markup=reply_markup,
             parse_mode="Markdown"
         )
 
@@ -208,6 +233,7 @@ async def handle_file(update: Update, context):
 
 # Register handlers
 tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(CommandHandler("menu", start)) # Alias for convenience
 tg_app.add_handler(CallbackQueryHandler(button_callback))
 tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file))
 
