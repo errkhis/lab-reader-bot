@@ -119,7 +119,12 @@ async def handle_file(update: Update, context):
                 context.user_data.clear()
                 await status_msg.edit_text(analysis_text, parse_mode="Markdown")
             else:
-                await status_msg.edit_text(f"❌ API Error ({response.status_code})")
+                # Try to get error detail from JSON
+                try:
+                    error_detail = response.json().get("detail", "Unknown Error")
+                except:
+                    error_detail = response.text or "Unknown Error"
+                await status_msg.edit_text(f"❌ API Error ({response.status_code}): {error_detail}")
                 
     except Exception as e:
         logger.error(f"Error: {e}")
