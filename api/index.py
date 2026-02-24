@@ -36,9 +36,9 @@ async def start(update: Update, context):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "👋 **Welcome to Lab Reader!** 🩺\n\n"
+        "👋 *Welcome to Lab Reader!* 🩺\n\n"
         "I can help you understand your medical documents in plain language.\n\n"
-        "**What would you like me to do today?**",
+        "*What would you like me to do today?*",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -68,7 +68,7 @@ async def button_callback(update: Update, context):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            f"Great! You chose **{task.capitalize()}**.\nNow, please select your preferred language:",
+            f"Great! You chose *{task.capitalize()}*.\nNow, please select your preferred language:",
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
@@ -81,8 +81,8 @@ async def button_callback(update: Update, context):
         task_emoji = "📊" if task == "analysis" else "💊"
         
         await query.edit_message_text(
-            f"{task_emoji} Ready for **{task.capitalize()}** in **{lang}**! ✅\n\n"
-            "📸 Please **upload an image or PDF** of your document now.\n\n"
+            f"{task_emoji} Ready for *{task.capitalize()}* in *{lang}*! ✅\n\n"
+            "📸 Please *upload an image or PDF* of your document now.\n\n"
             "_I will process it and provide a detailed explanation._",
             parse_mode="Markdown"
         )
@@ -128,10 +128,12 @@ async def handle_file(update: Update, context):
                 
                 # Try sending with Markdown, fallback to plain text if Telegram rejects it
                 try:
-                    # Clean up common markdown issues from AI
-                    # MarkdownV1 doesn't like ``` blocks well if not handled perfectly
-                    display_text = analysis_text.replace("```markdown", "").replace("```", "").strip()
-                    await status_msg.edit_text(display_text, parse_mode="Markdown")
+                    # Clean up common markdown issues for Telegram V1
+                    clean_text = analysis_text.replace("```markdown", "").replace("```", "")
+                    # Convert double stars to single stars for more reliable V1 bolding
+                    clean_text = clean_text.replace("**", "*").strip()
+                    
+                    await status_msg.edit_text(clean_text, parse_mode="Markdown")
                 except Exception as e:
                     logger.warning(f"Markdown failed, falling back to plain text: {e}")
                     await status_msg.edit_text(analysis_text)
