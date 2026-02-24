@@ -22,6 +22,10 @@ API_URL = os.getenv("API_URL", "").rstrip('/')
 app = FastAPI()
 tg_app = Application.builder().token(TOKEN).build()
 
+# Global state to prevent multiple initializations in the same container
+initialized = False
+processed_updates = set() # Simple cache for the current container lifecycle
+
 async def start(update: Update, context):
     """Entry point: (1) Choice between analysis and medications"""
     keyboard = [
@@ -32,8 +36,11 @@ async def start(update: Update, context):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "Welcome! 🩺\n\nWhat would you like me to do today?",
-        reply_markup=reply_markup
+        "👋 **Welcome to Lab Reader!** 🩺\n\n"
+        "I can help you understand your medical documents in plain language.\n\n"
+        "**What would you like me to do today?**",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
 
 async def button_callback(update: Update, context):
@@ -71,9 +78,12 @@ async def button_callback(update: Update, context):
         lang = data.split("_")[1]
         context.user_data["lang"] = lang
         task = context.user_data.get("task", "analysis")
+        task_emoji = "📊" if task == "analysis" else "💊"
         
         await query.edit_message_text(
-            f"Setting up for **{task.capitalize()}** in **{lang}**. ✅\n\n📸 Please **upload an image or PDF** of your document now.",
+            f"{task_emoji} Ready for **{task.capitalize()}** in **{lang}**! ✅\n\n"
+            "📸 Please **upload an image or PDF** of your document now.\n\n"
+            "_I will process it and provide a detailed explanation._",
             parse_mode="Markdown"
         )
 
@@ -118,8 +128,12 @@ async def handle_file(update: Update, context):
                 
                 # Try sending with Markdown, fallback to plain text if Telegram rejects it
                 try:
-                    await status_msg.edit_text(analysis_text, parse_mode="Markdown")
-                except:
+                    # Clean up common markdown issues from AI
+                    # MarkdownV1 doesn't like ``` blocks well if not handled perfectly
+                    display_text = analysis_text.replace("```markdown", "").replace("```", "").strip()
+                    await status_msg.edit_text(display_text, parse_mode="Markdown")
+                except Exception as e:
+                    logger.warning(f"Markdown failed, falling back to plain text: {e}")
                     await status_msg.edit_text(analysis_text)
             elif response.status_code == 429:
                 await status_msg.edit_text("⚠️ **Gemini API Quota Exceeded**\n\nPlease wait about 60 seconds and try again.", parse_mode="Markdown")
@@ -143,12 +157,34 @@ tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_f
 @app.post("/")
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, tg_app.bot)
+    global initialized
     
-    await tg_app.initialize()
-    await tg_app.process_update(update)
-    return {"status": "ok"}
+    try:
+        data = await request.json()
+        update = Update.de_json(data, tg_app.bot)
+        
+        # Log update details for debugging
+        logger.info(f"Received update_id: {update.update_id}")
+        
+        # Prevent processing the same update multiple times in this container
+        if update.update_id in processed_updates:
+            logger.info(f"Duplicate update_id {update.update_id} ignored.")
+            return {"status": "already processed"}
+        
+        processed_updates.add(update.update_id)
+        # Keep the set size manageable
+        if len(processed_updates) > 100:
+            processed_updates.pop()
+
+        if not initialized:
+            await tg_app.initialize()
+            initialized = True
+        
+        await tg_app.process_update(update)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Error in webhook: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/")
 async def index():
