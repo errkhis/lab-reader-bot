@@ -2,6 +2,7 @@ import os
 import logging
 import io
 import httpx
+import base64
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -215,9 +216,21 @@ async def handle_file(update: Update, context):
                     
                     await status_msg.edit_text(clean_text, parse_mode="Markdown")
                 except Exception as e:
-                    logger.warning(f"Markdown failed, falling back to plain text: {e}")
                     await status_msg.edit_text(analysis_text)
                 
+                # Send voice if available
+                voice_base64 = response.json().get("voice")
+                if voice_base64:
+                    try:
+                        voice_bytes = base64.b64decode(voice_base64)
+                        await update.message.reply_voice(
+                            voice=io.BytesIO(voice_bytes),
+                            filename="analysis.ogg",
+                            caption="🎙 Audio Version"
+                        )
+                    except Exception as ve:
+                        logger.error(f"Error sending voice: {ve}")
+
                 # Track successful LLM interaction in Supabase
                 if supabase:
                     try:
