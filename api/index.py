@@ -2,6 +2,7 @@ import os
 import logging
 import io
 import httpx
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -85,17 +86,20 @@ async def button_callback(update: Update, context):
     if data.startswith("task_"):
         task = data.split("_")[1]
         
-        # Save task to Supabase
+        # Update user metadata in Supabase
         if supabase:
+            lang_code = update.effective_user.language_code if update.effective_user else None
             try:
-                supabase.table("user_state").upsert({
+                # Upsert basic info on any interaction
+                supabase.table("users").upsert({
                     "chat_id": str(chat_id),
-                    "task": task
+                    "last_interaction_datetime": datetime.now(timezone.utc).isoformat(),
+                    "localization": lang_code
                 }, on_conflict="chat_id").execute()
             except Exception as e:
-                logger.error(f"Supabase error (task): {e}")
+                logger.error(f"Supabase error (metadata): {e}")
         
-        # Fallback to user_data for same-container requests
+        # Use user_data for session state (not persisted in DB anymore)
         context.user_data["task"] = task
         
         keyboard = [
@@ -122,12 +126,14 @@ async def button_callback(update: Update, context):
     elif data.startswith("lang_"):
         lang = data.split("_")[1]
         
-        # Save lang to Supabase
+        # Update last interaction in Supabase
         if supabase:
             try:
-                supabase.table("user_state").update({"lang": lang}).eq("chat_id", str(chat_id)).execute()
+                supabase.table("users").update({
+                    "last_interaction_datetime": datetime.now(timezone.utc).isoformat()
+                }).eq("chat_id", str(chat_id)).execute()
             except Exception as e:
-                logger.error(f"Supabase error (lang): {e}")
+                logger.error(f"Supabase error (interaction): {e}")
 
         context.user_data["lang"] = lang
         
@@ -167,20 +173,9 @@ async def handle_file(update: Update, context):
     """Final Step: Process the uploaded file based on stored task and lang"""
     chat_id = update.effective_chat.id
     
-    # Try fetching from Supabase first (most reliable on Vercel)
-    task, lang = None, None
-    if supabase:
-        try:
-            res = supabase.table("user_state").select("task, lang").eq("chat_id", str(chat_id)).execute()
-            if res.data:
-                task = res.data[0].get("task")
-                lang = res.data[0].get("lang")
-        except Exception as e:
-            logger.error(f"Supabase fetch error: {e}")
-
-    # Fallback to user_data or defaults
-    task = task or context.user_data.get("task", "analysis")
-    lang = lang or context.user_data.get("lang", "English")
+    # Try fetching from user_data (now the primary state source)
+    task = context.user_data.get("task", "analysis")
+    lang = context.user_data.get("lang", "English")
 
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
@@ -223,6 +218,22 @@ async def handle_file(update: Update, context):
                     logger.warning(f"Markdown failed, falling back to plain text: {e}")
                     await status_msg.edit_text(analysis_text)
                 
+                # Track successful LLM interaction in Supabase
+                if supabase:
+                    try:
+                        # Fetch current count to increment
+                        res = supabase.table("users").select("llm_interactions").eq("chat_id", str(chat_id)).execute()
+                        count = 0
+                        if res.data:
+                            count = res.data[0].get("llm_interactions") or 0
+                        
+                        supabase.table("users").update({
+                            "llm_interactions": count + 1,
+                            "last_interaction_datetime": datetime.now(timezone.utc).isoformat()
+                        }).eq("chat_id", str(chat_id)).execute()
+                    except Exception as e:
+                        logger.error(f"Supabase tracking error: {e}")
+
                 # Automatically show main menu for next document
                 await update.message.reply_text(
                     "✅ *Done!*\n\nWould you like to analyze another document?",
