@@ -45,7 +45,10 @@ def get_main_menu():
         [
             InlineKeyboardButton("📊 Lab Analysis", callback_data="task_analysis"),
             InlineKeyboardButton("💊 Medications", callback_data="task_medication"),
+        ],
+        [
             InlineKeyboardButton("📋 Prescription", callback_data="task_prescription"),
+            InlineKeyboardButton("🦴 Radiography", callback_data="task_radiography"),
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -139,7 +142,8 @@ async def button_callback(update: Update, context):
         task_emojis = {
             "analysis": "📊",
             "medication": "💊",
-            "prescription": "📋"
+            "prescription": "📋",
+            "radiography": "🦴"
         }
         task_emoji = task_emojis.get(task, "📊")
         
